@@ -3,6 +3,14 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Annotated, TypedDict
+
+from pydantic import BaseModel, Field, create_model
+
+
+class Table(TypedDict):
+    data: list[BaseModel]
+    model: type[BaseModel]
 
 
 @dataclass
@@ -163,7 +171,7 @@ class ToySQLParser:
         elif operator == "<=":
             return lambda row: row[left] <= right
         elif operator == ">":
-            return lambda row: row[left] > right
+            return lambda row: getattr(row, left) > right
         elif operator == ">=":
             return lambda row: row[left] >= right
         else:
@@ -172,7 +180,7 @@ class ToySQLParser:
 
 class ToyDB:
     def __init__(self):
-        self.tables = dict[str, list[dict]]()
+        self.tables = dict[str, Table]()
         self.parser = ToySQLParser()
 
     def execute(self, query: str):
@@ -190,10 +198,11 @@ class ToyDB:
 
     def _execute_select(self, query: SelectSQL) -> list[dict]:
         table = self.tables.get(query.table)
-        if not table:
+
+        if table is None:
             raise ValueError(f"Table '{query.table}' does not exist")
 
-        result = table
+        result = table["data"]
         if query.where_lambda:
             result = list(filter(query.where_lambda, result))
         if query.orderby:
@@ -207,13 +216,20 @@ class ToyDB:
         if table is None:
             raise ValueError(f"Table '{query.table}' does not exist")
 
-        table.append(
-            {col: val for col, val in zip(query.columns, query.values, strict=True)},
+        model = table["model"]
+        data = table["data"]
+        data.append(
+            model.model_validate(
+                {
+                    col: val
+                    for col, val in zip(query.columns, query.values, strict=True)
+                },
+            )
         )
 
     def _execute_update(self, query: UpdateSQL):
         table = self.tables.get(query.table)
-        if not table:
+        if table is None:
             raise ValueError(f"Table '{query.table}' does not exist")
 
         for row in table:
@@ -224,24 +240,34 @@ class ToyDB:
 
     def _execute_delete(self, query: DeleteSQL):
         table = self.tables.get(query.table)
-        if not table:
+        if table is None:
             raise ValueError(f"Table '{query.table}' does not exist")
 
         self.tables[query.table] = [
             row for row in table if not (query.where_lambda and query.where_lambda(row))
         ]
 
-    def create_table(self, name: str, columns: list[str]):
+    def create_table(self, name: str, columns: dict[str, object]):
         if name in self.tables:
             raise ValueError(f"Table '{name}' already exists")
-        self.tables[name] = []
+        self.tables[name] = {
+            "model": create_model(name, **columns),
+            "data": [],
+        }
 
 
 if __name__ == "__main__":
     import icecream
 
     db = ToyDB()
-    db.create_table("users", ["id", "name", "age"])
+    db.create_table(
+        "users",
+        {
+            "id": Annotated[int, Field(...)],
+            "name": Annotated[str, Field(...)],
+            "age": Annotated[int | None, Field(...)],
+        },
+    )
 
     db.execute("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30);")
     db.execute("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25);")
@@ -250,6 +276,6 @@ if __name__ == "__main__":
     icecream.ic(db.execute("SELECT * FROM users;"))
     icecream.ic(db.execute("SELECT * FROM users WHERE age > 30 ORDER BY name;"))
     icecream.ic(db.execute("UPDATE users SET age=40 WHERE id=1;"))
-    icecream.ic(db.execute("SELECT * FROM users;"))
+    icecream.ic(db.execute("SELECT * FROM users order by name;"))
     icecream.ic(db.execute("DELETE FROM users WHERE age < 30;"))
     icecream.ic(db.execute("SELECT * FROM users;"))
